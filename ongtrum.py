@@ -3,17 +3,29 @@ import atexit
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from time import time
 
 from ast_parser import parse  # noqa
 from fs_scanner import scan  # noqa
 
 
-def worker_run_files(batch: list, suite: str = None):
+@dataclass(frozen=False)
+class TestFilter:
+    file_name: str = None
+    cls_name: str = None
+    method_name: str = None
+
+
+def worker_run_files(batch: list, suite: str = None, test_filter: TestFilter = None):
     """ Execute multiple files in one worker to reduce process overhead """
     results = []
 
-    for content, test_methods in batch:
+    for file_name, content, test_methods in batch:
+        # Filter (File Name)
+        if test_filter.file_name and test_filter.file_name != '*' and file_name != test_filter.file_name:
+            continue
+
         namespace = dict()
         try:
             code_obj = compile(content, '<string>', 'exec')
@@ -25,6 +37,11 @@ def worker_run_files(batch: list, suite: str = None):
             continue
 
         for cls_name, method_names in test_methods.items():
+
+            # Filter (Class Name)
+            if test_filter.cls_name and test_filter.cls_name != '*' and cls_name != test_filter.cls_name:
+                continue
+
             cls = namespace.get(cls_name)
             if not cls:
                 for m in method_names:
@@ -33,6 +50,11 @@ def worker_run_files(batch: list, suite: str = None):
 
             instance = cls()
             for method_name in method_names:
+
+                # Filter (Method Name)
+                if test_filter.method_name and method_name != test_filter.method_name:
+                    continue
+
                 method = getattr(instance, method_name, None)
                 if not method:
                     results.append((cls_name, method_name, False, 'MethodNotFound'))  # noqa
@@ -53,9 +75,9 @@ def worker_run_files(batch: list, suite: str = None):
                         else:
                             method(**params)
 
-                        results.append((cls_name, method_name, True, None, params))
+                        results.append((file_name, cls_name, method_name, True, None, params))
                     except Exception as e:
-                        results.append((cls_name, method_name, False, f'{type(e)} - {str(e) or "Unspecified"}', params))
+                        results.append((file_name, cls_name, method_name, False, f'{type(e)} - {str(e) or "Unspecified"}', params))
 
     return results
 
@@ -65,7 +87,8 @@ def run(
         max_workers: int = None,
         quiet: bool = False,
         batch_size: int = 64,
-        suite: str = None
+        suite: str = None,
+        test_filter: str = None
 ):
     print(
         '\n'.join([
@@ -73,8 +96,9 @@ def run(
             f'Max Workers: {max_workers or "1"}',
             f'Batch Size: {batch_size}',
             f'Quiet: {quiet}',
-            f'Suite: "{suite}"'
-        ]) + '\n'
+            f'Suite: "{suite}"',
+            f'Filter: "{test_filter}"'
+        ])
     )
 
     collected_tests = 0
@@ -85,30 +109,44 @@ def run(
     sys.path.insert(0, root_dir)
     atexit.register(lambda: sys.path.pop(0) if sys.path and sys.path[0] == root_dir else None)
 
+    tf = TestFilter()
+
+    if test_filter:
+        parts = test_filter.split('.')
+        n = len(parts)
+
+        if not 1 <= n <= 3:
+            raise ValueError('Invalid test filter format - Use file.class.method')
+
+        parts += [None] * (3 - n)
+        tf.file_name, tf.cls_name, tf.method_name = parts
+
     all_tasks = []
 
-    for content in scan(root_dir):
+    for file_name, content in scan(root_dir):
         test_classes, test_methods, _imports = parse(content)
         if not test_classes:
             continue
         collected_tests += sum(len(m) for m in test_methods.values())
-        all_tasks.append((content, test_methods))
+        all_tasks.append((file_name.removesuffix('.py'), content, test_methods))
+
+    if not quiet:
+        print('\n- - - Results - - -\n')
 
     # Single-Worker
     if max_workers is None or max_workers == 1:
         for task in all_tasks:
-            results = worker_run_files([task], suite)
-            for cls_name, method_name, passed, error, params in results:
+            results = worker_run_files([task], suite, tf)
+            for file_name, cls_name, method_name, passed, error, params in results:
                 params_exp = f'[{params}]' if params else ''
                 executed_tests += 1
                 if passed:
                     if not quiet:
-
-                        print(f'\033[92m[PASS]\033[0m {cls_name}.{method_name}{params_exp}')
+                        print(f'\033[92m[PASS]\033[0m {file_name}.{cls_name}.{method_name}{params_exp}')
                 else:
                     total_failures += 1
                     if not quiet:
-                        print(f'\033[91m[FAIL]\033[0m {cls_name}.{method_name}{params_exp} → {error}')
+                        print(f'\033[91m[FAIL]\033[0m {file_name}.{cls_name}.{method_name}{params_exp} → {error}')
 
     # Multi-Workers
     else:
@@ -119,19 +157,19 @@ def run(
 
         batches = [all_tasks[i:i + batch_size] for i in range(0, len(all_tasks), batch_size)]
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(worker_run_files, batch, suite) for batch in batches]
+            futures = [executor.submit(worker_run_files, batch, suite, tf) for batch in batches]
 
             for future in as_completed(futures):
-                for cls_name, method_name, passed, error, params in future.result():
+                for file_name, cls_name, method_name, passed, error, params in future.result():
                     params_exp = f'[{params}]' if params else ''
                     executed_tests += 1
                     if passed:
                         if not quiet:
-                            print(f'\033[92m[PASS]\033[0m {cls_name}.{method_name}{params_exp}')
+                            print(f'\033[92m[PASS]\033[0m {file_name}.{cls_name}.{method_name}{params_exp}')
                     else:
                         total_failures += 1
                         if not quiet:
-                            print(f'\033[91m[FAIL]\033[0m {cls_name}.{method_name}{params_exp} → {error}')
+                            print(f'\033[91m[FAIL]\033[0m {file_name}.{cls_name}.{method_name}{params_exp} → {error}')
 
     # Summary
     print('\n- - - Summary - - -\n')
@@ -149,9 +187,18 @@ if __name__ == '__main__':
     parser.add_argument('-bs', '--batch-size', type=int, default=64, help='Number of test files each worker processes at once (default: 64)')
     parser.add_argument('-q', '--quiet', action='store_true', help='Run in quiet mode (minimal output)')
     parser.add_argument('-s', '--suite', type=str, required=False, help='Test suite to run')
+    parser.add_argument('-f', '--filter', type=str, help='Run only a specific test: file, file.class, or file.class.method')
+
     args = parser.parse_args()
 
     if not os.path.exists(args.project):
         raise ValueError(f'Project {args.project} does not exist!')
 
-    run(args.project, max_workers=args.workers, quiet=args.quiet, batch_size=args.batch_size, suite=args.suite)
+    run(
+        args.project,
+        max_workers=args.workers,
+        quiet=args.quiet,
+        batch_size=args.batch_size,
+        suite=args.suite,
+        test_filter=args.filter
+    )

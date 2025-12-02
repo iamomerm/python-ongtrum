@@ -25,6 +25,4 @@ def scan(str root_dir):
             if memcmp(c_bfname, b"test_", 5) == 0 and memcmp(c_bfname + fname_len - 3, b".py", 3) == 0:
                 with open(os.path.join(dirpath, fname), 'r', encoding='utf-8') as f:
                     f_content = f.read()
-                yield f_content
-
-
+                yield fname, f_content
