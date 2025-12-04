@@ -45,24 +45,26 @@ def parameters(params: list[dict]):
 
 
 def prep(name: Optional[str] = None, *, scope: str = "method"):
-    """
-    Decorator to register a prep (fixture)
-
-    Example:
-        @prep(scope="session")
-        def db():
-            ...
-    """
     allowed_scopes = {'session', 'class', 'method'}
     if scope not in allowed_scopes:
         raise ValueError(f'Invalid Scope: {scope!r}, Allowed Scopes: {allowed_scopes}')
 
     def decorator(fn: Callable[..., Any]):
         prep_name = name or fn.__name__
-
         Session().preps.setdefault(scope, {})
         Session().preps[scope][prep_name] = fn
-
         return fn
+
+    return decorator
+
+
+def preps(*prep_names: str):
+    """ Mark a test class or method to use specific preps """
+
+    def decorator(obj):
+        if not hasattr(obj, '__preps__'):
+            obj.__preps__ = []
+        obj.__preps__.extend(prep_names)
+        return obj
 
     return decorator

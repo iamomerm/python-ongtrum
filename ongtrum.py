@@ -81,32 +81,31 @@ def passes_filter(value: str, filter_value: Optional[str]) -> bool:
 
 def run_method(file_name: str, instance: Any, cls_name: str, method_name: str) -> list[TestSpec]:
     results = []
-
     method = getattr(instance, method_name, None)
-
     if not method:
         results.append(TestSpec(file_name, cls_name, method_name, False, 'MethodNotFound'))
         return results
 
     params_list = getattr(method, '__params__', [None])
+    method_preps = getattr(method, '__preps__', [])
+
+    # Method Preps
+    prep_values = run_preps('method', method_preps) or {}
+
     for params in params_list:
         try:
-            if params is None:
-                method()
-            elif isinstance(params, dict):
-                method(**params)
+            call_kwargs = {**prep_values}
+            if isinstance(params, dict):
+                call_kwargs.update(params)
             elif isinstance(params, (list, tuple)):
-                method(*params)
+                method(*params, **call_kwargs)
+                results.append(TestSpec(file_name, cls_name, method_name, True, params=params))
+                continue
+
+            method(**call_kwargs)
             results.append(TestSpec(file_name, cls_name, method_name, True, params=params))
         except Exception as e:
-            results.append(TestSpec(
-                file_name,
-                cls_name,
-                method_name,
-                False,
-                f'{type(e).__name__} - {str(e) or "Undefined"}',
-                params
-            ))
+            results.append(TestSpec(file_name, cls_name, method_name, False, f'{type(e).__name__} - {str(e) or "Undefined"}', params))
 
     return results
 
@@ -135,6 +134,7 @@ def worker_run_files(batch: list, test_filter: Any = None) -> list[TestSpec]:
         if not filtered_test_methods:
             continue
 
+        # Compile Test File Into a Namespace
         test_namespace = {}
         try:
             exec(compile(content, file_name, 'exec'), test_namespace)
@@ -144,6 +144,7 @@ def worker_run_files(batch: list, test_filter: Any = None) -> list[TestSpec]:
                     results.append(TestSpec(file_name, cls_name, m, False, f'ExecError: {e}'))
             continue
 
+        # Run Tests
         for cls_name, method_names in filtered_test_methods.items():
             cls = test_namespace.get(cls_name)
             if not cls:
@@ -153,30 +154,19 @@ def worker_run_files(batch: list, test_filter: Any = None) -> list[TestSpec]:
 
             instance = cls()
 
-            # Class Preps
-            run_preps('class', cls_instance=instance)
+            # Session Preps Injection to Class
+            for name, val in Session().prep_cache['session'].items():
+                setattr(instance, name, val)
 
+            # Class Preps Injection to Class
+            class_preps = getattr(cls, '__preps__', [])
+            class_vals = run_preps('class', class_preps)
+            for name, val in class_vals.items():
+                setattr(instance, name, val)
+
+            # Run Methods
             for method_name in method_names:
-                method = getattr(instance, method_name, None)
-                if not method:
-                    results.append(TestSpec(file_name, cls_name, method_name, False, 'MethodNotFound'))
-                    continue
-
-                # Method Preps
-                run_preps('method', cls_instance=instance)
-
-                params_list = getattr(method, '__params__', [None])
-                for params in params_list:
-                    try:
-                        if params is None:
-                            method()
-                        elif isinstance(params, dict):
-                            method(**params)
-                        elif isinstance(params, (list, tuple)):
-                            method(*params)
-                        results.append(TestSpec(file_name, cls_name, method_name, True, params=params))
-                    except Exception as e:
-                        results.append(TestSpec(file_name, cls_name, method_name, False, f'{type(e).__name__} - {str(e) or "Undefined"}', params))
+                results.extend(run_method(file_name, instance, cls_name, method_name))
 
     return results
 
@@ -192,35 +182,25 @@ def load_prep_file(file_path: str):
     spec.loader.exec_module(module)
 
 
-def run_preps(scope: str, cls_instance=None):
+def run_preps(scope: str, prep_names: list[str]):
     """
     Runs all preps for a given scope
     Session/class preps cached, method preps always re-run
     """
-    sess = Session()
+    session = Session()
+    cache = session.prep_cache.get(scope, {})
 
-    if scope in ('session', 'class'):
-        cache = sess.prep_cache[scope]
-
-        for name, fn in sess.preps[scope].items():
-            if name not in cache:
-                if scope == 'class' and cls_instance:
-                    cache[name] = fn(cls_instance)
-                else:
-                    cache[name] = fn()
-        return cache
-
-    elif scope == 'method':
-        values = {}
-        for name, fn in sess.preps['method'].items():
-            if cls_instance:
-                values[name] = fn(cls_instance)
+    results = {}
+    for name in prep_names:
+        fn = session.preps[scope].get(name)
+        if fn:
+            if scope in ('session', 'class') and name in cache:
+                results[name] = cache[name]
             else:
-                values[name] = fn()
-        return values
-
-    else:
-        raise ValueError('Invalid prep scope')
+                results[name] = fn()
+                if scope in ('session', 'class'):
+                    cache[name] = results[name]
+    return results
 
 
 def run(
@@ -283,7 +263,8 @@ def run(
     reprs = []
 
     # Session Preps
-    run_preps('session')
+    session = Session()
+    run_preps('session', prep_names=list(session.preps['session'].keys()))
 
     # Single Worker
     if not max_workers or max_workers == 1:
