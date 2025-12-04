@@ -1,5 +1,6 @@
 import argparse
 import atexit
+import importlib.util
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -10,6 +11,8 @@ from typing import Optional, Any
 import yaml
 from ast_parser import parse  # noqa
 from fs_scanner import scan  # noqa
+
+from session import Session
 
 
 @dataclass
@@ -44,8 +47,8 @@ class ConfigSpec:
 
 
 def parse_ongtrum_config(project_root: str) -> Optional[ConfigSpec]:
-    """ Reads 'ongtrum_config.yaml' at the project root and returns list of prep files """
-    config_path = os.path.join(project_root, 'ongtrum_config.yaml')
+    """ Reads 'ongtrum.yaml' at the project root and returns list of prep files """
+    config_path = os.path.join(project_root, 'ongtrum.yaml')
     if not os.path.exists(config_path):
         return None
 
@@ -81,7 +84,6 @@ def run_method(file_name: str, instance: Any, cls_name: str, method_name: str) -
 
     method = getattr(instance, method_name, None)
 
-    # Run the test method itself
     if not method:
         results.append(TestSpec(file_name, cls_name, method_name, False, 'MethodNotFound'))
         return results
@@ -150,11 +152,18 @@ def worker_run_files(batch: list, test_filter: Any = None) -> list[TestSpec]:
                 continue
 
             instance = cls()
+
+            # Class Preps
+            run_preps('class', cls_instance=instance)
+
             for method_name in method_names:
                 method = getattr(instance, method_name, None)
                 if not method:
                     results.append(TestSpec(file_name, cls_name, method_name, False, 'MethodNotFound'))
                     continue
+
+                # Method Preps
+                run_preps('method', cls_instance=instance)
 
                 params_list = getattr(method, '__params__', [None])
                 for params in params_list:
@@ -167,18 +176,51 @@ def worker_run_files(batch: list, test_filter: Any = None) -> list[TestSpec]:
                             method(*params)
                         results.append(TestSpec(file_name, cls_name, method_name, True, params=params))
                     except Exception as e:
-                        results.append(
-                            TestSpec(
-                                file_name,
-                                cls_name,
-                                method_name,
-                                False,
-                                f'{type(e).__name__} - {str(e) or "Undefined"}',
-                                params
-                            )
-                        )
+                        results.append(TestSpec(file_name, cls_name, method_name, False, f'{type(e).__name__} - {str(e) or "Undefined"}', params))
 
     return results
+
+
+def load_prep_file(file_path: str):
+    """
+    Import a prep file dynamically so that all @prep decorators run
+    and register preps into Session()
+    """
+    module_name = os.path.splitext(os.path.basename(file_path))[0]
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+
+def run_preps(scope: str, cls_instance=None):
+    """
+    Runs all preps for a given scope
+    Session/class preps cached, method preps always re-run
+    """
+    sess = Session()
+
+    if scope in ('session', 'class'):
+        cache = sess.prep_cache[scope]
+
+        for name, fn in sess.preps[scope].items():
+            if name not in cache:
+                if scope == 'class' and cls_instance:
+                    cache[name] = fn(cls_instance)
+                else:
+                    cache[name] = fn()
+        return cache
+
+    elif scope == 'method':
+        values = {}
+        for name, fn in sess.preps['method'].items():
+            if cls_instance:
+                values[name] = fn(cls_instance)
+            else:
+                values[name] = fn()
+        return values
+
+    else:
+        raise ValueError('Invalid prep scope')
 
 
 def run(
@@ -240,6 +282,9 @@ def run(
 
     reprs = []
 
+    # Session Preps
+    run_preps('session')
+
     # Single Worker
     if not max_workers or max_workers == 1:
         for task in all_tasks:
@@ -293,8 +338,13 @@ if __name__ == '__main__':
     # Load Config
     config = parse_ongtrum_config(args.project)
 
-    if config:
-        pass  # Handle Config
+    if config and config.prep_files:
+        for prep_file in config.prep_files:
+            if os.path.exists(prep_file):
+                load_prep_file(prep_file)
+                print(Session().preps)
+            else:
+                print(f'WARNING: Prep File {prep_file} Not Found')
 
     run(
         args.project,
