@@ -3,6 +3,8 @@ import time
 
 project_dir = r'C:\Temp\test_project'
 
+# Dec 5, 2025
+
 # Unittest
 start = time.time()
 subprocess.run(['python', '-m', 'unittest', 'discover', project_dir])
@@ -15,7 +17,7 @@ ongtrum_time = time.time() - start
 
 # PyTest
 start = time.time()
-subprocess.run(['pytest', project_dir, '-s', '-q'])
+subprocess.run(['python', '-m', 'pytest', project_dir, '-s', '-q'])
 pytest_time = time.time() - start
 
 print(f'Unittest: {unittest_time:.3f}s')

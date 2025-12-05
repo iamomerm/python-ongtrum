@@ -1,10 +1,10 @@
 from functools import wraps
-from typing import Union, Optional, Callable, Any
+from typing import Callable, Any
 
-from session import Session
+from ongtrum.session import Session
 
 
-def suites(suites: Union[str, list[str]]):  # noqa
+def suites(suites: str or list[str]):  # noqa
     """
     Decorator to associate a test function with one or more test suites
     Accepts a single suite name (string) or a list of suite names
@@ -24,7 +24,7 @@ def suites(suites: Union[str, list[str]]):  # noqa
     return decorator
 
 
-def parameters(params: list[dict]):
+def parameters(params: dict or list[dict]):
     """
     Decorator to associate test parameters with a test method
     Accepts a single dict or a list of dicts
@@ -44,13 +44,13 @@ def parameters(params: list[dict]):
     return decorator
 
 
-def prep(name: Optional[str] = None, *, scope: str = "method"):
+def prep(*, scope: str = "method"):
     allowed_scopes = {'session', 'class', 'method'}
     if scope not in allowed_scopes:
         raise ValueError(f'Invalid Scope: {scope!r}, Allowed Scopes: {allowed_scopes}')
 
     def decorator(fn: Callable[..., Any]):
-        prep_name = name or fn.__name__
+        prep_name = fn.__name__
         Session().preps.setdefault(scope, {})
         Session().preps[scope][prep_name] = fn
         return fn
@@ -58,8 +58,11 @@ def prep(name: Optional[str] = None, *, scope: str = "method"):
     return decorator
 
 
-def preps(*prep_names: str):
+def preps(prep_names: str or list[str]):
     """ Mark a test class or method to use specific preps """
+
+    if isinstance(prep_names, str):
+        prep_names = [prep_names]
 
     def decorator(obj):
         if not hasattr(obj, '__preps__'):
